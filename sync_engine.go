@@ -1,88 +1,59 @@
 package main
 
 import (
-	"fmt"
 	"log"
+	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
+func isSyncable(key string) bool {
+	if key == MetadataFileName {
+		return false
+	}
+	if strings.HasPrefix(key, BackupDirectory) {
+		return false
+	}
+	return true
+}
+
 // last write wins
-func replicate(source, replica DataNode) error {
-	srcList, err := source.ListObjects()
+func syncNode(source, replica DataNode) error {
+	srcList, err := source.List()
 	if err != nil {
 		return err
 	}
 	srcObjects := make(map[string]types.Object)
 	for _, obj := range srcList {
-		srcObjects[*obj.Key] = obj
+		if key := *obj.Key; isSyncable(key) {
+			srcObjects[key] = obj
+		}
 	}
 
-	replList, err := replica.ListObjects()
+	replList, err := replica.List()
 	if err != nil {
 		return err
 	}
-	// TODO: make it concurrent
+
+	var wg sync.WaitGroup
 	for _, replObj := range replList {
-		// if object not exists in source but exists in replica
-		if srcObj, found := srcObjects[*replObj.Key]; !found {
-			// if creation time > last update -> create
-			// else -> do nothing
-			if source.GetLastUpdate().After(source.GetLastUpdate()) {
-				fileContent, err := replica.Get(*replObj.Key)
-				if err != nil {
-					return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
-				}
-				err = source.Create(*replObj.Key, fileContent)
-				if err != nil {
-					return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
-				}
-				log.Printf("created %s", *replObj.Key)
-			}
-		} else { // both objects exists
-			// if etags are equal -> do nothing
-			// if source last modified is greater -> do nothing
-			// if destination last modified is greater -> keep a backup + replace the file from destination
-			if srcObj.ETag == replObj.ETag {
-				continue
-			} else if srcObj.LastModified.After(*replObj.LastModified) {
-				continue
-			} else {
-				err := source.Backup(*srcObj.Key)
-				if err != nil {
-					return fmt.Errorf("cannot get backup %s: %e", *srcObj.Key, err)
-				}
-				fileContent, err := replica.Get(*replObj.Key)
-				if err != nil {
-					return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
-				}
-				err = source.Create(*replObj.Key, fileContent)
-				if err != nil {
-					return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
-				}
-				log.Printf("modified %s", *replObj.Key)
-			}
-			// TODO DO NOT DELETE
-			delete(srcObjects, *replObj.Key)
-		}
-	}
-	// if object exists in source but not in replica
-	for _, srcObj := range srcObjects {
-		// if creation time > last update -> do nothing
-		if srcObj.LastModified.After(source.GetLastUpdate()) {
+		key := *replObj.Key
+		if !isSyncable(key) {
 			continue
 		}
-		// else -> keep a backup + delte
-		err := source.Backup(*srcObj.Key)
-		if err != nil {
-			return fmt.Errorf("cannot get backup %s: %e", *srcObj.Key, err)
+		if srcObj, found := srcObjects[key]; found {
+			wg.Go(func() { syncObject(source, replica, &srcObj, &replObj) })
+			delete(srcObjects, key)
+		} else {
+			wg.Go(func() { syncObject(source, replica, nil, &replObj) })
 		}
-		err = source.Delete(*srcObj.Key)
-		if err != nil {
-			return fmt.Errorf("cannot sync %s: %e", *srcObj.Key, err)
-		}
-		log.Printf("deleted %s", *srcObj.Key)
 	}
+	for _, srcObj := range srcObjects {
+		wg.Go(func() { syncObject(source, replica, &srcObj, nil) })
+	}
+	wg.Wait()
+
 	return source.UpdateMetadata()
 }
 
@@ -91,60 +62,72 @@ func syncObject(source, replica DataNode, srcObj, replObj *types.Object) error {
 	if srcObj == nil {
 		// if last modified < last update -> do nothing, will be deleted in next syncs
 		if replObj.LastModified.Before(source.GetLastUpdate()) {
+			log.Printf("INFO: %s's LastModified in replica < lastUpdate: nothing to sync\n", *replObj.Key)
 			return nil
 		}
 		// if last modified > last update -> create
 		fileContent, err := replica.Get(*replObj.Key)
 		if err != nil {
-			return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
+			log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
+			return err
 		}
 		err = source.Create(*replObj.Key, fileContent)
 		if err != nil {
-			return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
+			log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
+			return err
 		}
-		log.Printf("created %s", *replObj.Key)
+		log.Printf("INFO: created %s\n", *replObj.Key)
 		return nil
 	}
 	// if object exists in source but not in replica
 	if replObj == nil {
 		// if last modified > last update -> keep, do nothing
 		if srcObj.LastModified.After(source.GetLastUpdate()) {
+			log.Printf("INFO: %s's LastModified in source > lastUpdate: nothing to sync\n", *srcObj.Key)
 			return nil
 		}
 		// else -> backup & delete
 		err := source.Backup(*srcObj.Key)
 		if err != nil {
-			return fmt.Errorf("cannot get backup %s: %e", *srcObj.Key, err)
+			log.Printf("ERROR: cannot get backup %s: %s\n", *srcObj.Key, err)
+			return err
 		}
 		err = source.Delete(*srcObj.Key)
 		if err != nil {
-			return fmt.Errorf("cannot sync %s: %e", *srcObj.Key, err)
+			log.Printf("ERROR: cannot sync %s: %s\n", *srcObj.Key, err)
+			return err
 		}
-		log.Printf("deleted %s", *srcObj.Key)
+		log.Printf("INOF: deleted %s\n", *srcObj.Key)
 		return nil
 	}
 	// both objects exists
 	// if etags are equal -> do nothing
+	// TODO Fix checking identical objects
 	if srcObj.ETag == replObj.ETag {
+		log.Printf("INFO: same etag for %s: nothing to sync\n", *srcObj.Key)
 		return nil
 	}
 	// if source last modified is greater -> do nothing
 	if srcObj.LastModified.After(*replObj.LastModified) {
+		log.Printf("INFO: %s's LastModified in source > lastUpdate :nothing to sync\n", *srcObj.Key)
 		return nil
 	}
 	// if destination last modified is greater -> backup + replace
 	err := source.Backup(*srcObj.Key)
 	if err != nil {
-		return fmt.Errorf("cannot get backup %s: %e", *srcObj.Key, err)
+		log.Printf("ERROR: cannot get backup %s: %s\n", *srcObj.Key, err)
+		return err
 	}
 	fileContent, err := replica.Get(*replObj.Key)
 	if err != nil {
-		return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
+		log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
+		return err
 	}
 	err = source.Create(*replObj.Key, fileContent)
 	if err != nil {
-		return fmt.Errorf("cannot sync %s: %e", *replObj.Key, err)
+		log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
+		return err
 	}
-	log.Printf("modified %s", *replObj.Key)
+	log.Printf("modified %s\n", *replObj.Key)
 	return nil
 }

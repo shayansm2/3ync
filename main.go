@@ -34,11 +34,14 @@ func main() {
 		o.BaseEndpoint = aws.String(os.Getenv("BASE_END_POINT"))
 		o.UsePathStyle = true
 	})
-	// replicate(ctx, client, "obsidian", "desktop")
-	replicate(
-		NewBucketDataNode(ctx, client, "obsidian"),
-		NewBucketDataNode(ctx, client, "desktop"),
+
+	err = syncNode(
+		NewBucketDataNode(ctx, client, "dest-test"),
+		NewBucketDataNode(ctx, client, "source-test"),
 	)
+	if err != nil {
+		fmt.Print(err)
+	}
 }
 
 // func gc() {}

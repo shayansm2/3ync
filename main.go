@@ -20,28 +20,34 @@ func main() {
 	}
 
 	ctx := context.Background()
+	client, err := createS3Client(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	desktop := NewBucketDataNode(ctx, client, "desktop")
+	main := NewBucketDataNode(ctx, client, "obsidian")
+
+	err = SyncNode(main, desktop)
+	if err != nil {
+		fmt.Print(err)
+	}
+}
+
+func createS3Client(ctx context.Context) (*s3.Client, error) {
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(os.Getenv("ACCESS_KEY"), os.Getenv("SECRET_KEY"), ""),
 		),
 		config.WithRegion("us-east-1"))
 	if err != nil {
-		fmt.Println("Couldn't load default configuration. Have you set up your AWS account?")
-		fmt.Println(err)
-		return
+		return nil, err
 	}
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		o.BaseEndpoint = aws.String(os.Getenv("BASE_END_POINT"))
 		o.UsePathStyle = true
 	})
-
-	err = syncNode(
-		NewBucketDataNode(ctx, client, "dest-test"),
-		NewBucketDataNode(ctx, client, "source-test"),
-	)
-	if err != nil {
-		fmt.Print(err)
-	}
+	return client, nil
 }
 
 // func gc() {}

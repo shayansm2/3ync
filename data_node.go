@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
-const MetadataFileName = ".metadata.json"
-const BackupDirectory = ".backup"
+const InternalDir = ".3ync"
 const DateFormat = "2006-01-02-15-04-05"
 
 type Metadata struct {
@@ -46,16 +46,25 @@ func NewBucketDataNode(ctx context.Context, client *s3.Client, name string) *Buc
 		name:   name,
 		ctx:    ctx,
 		client: client,
-		now:    time.Now(),
+		now:    time.Now().UTC(),
 	}
 }
 
 func (b *BucketDataNode) List() ([]types.Object, error) {
-	list, err := b.client.ListObjectsV2(b.ctx, &s3.ListObjectsV2Input{Bucket: &b.name})
+	list, err := b.client.ListObjectsV2(b.ctx, &s3.ListObjectsV2Input{
+		Bucket: &b.name,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("cannot list:%s \n", err)
 	}
-	return list.Contents, nil
+	result := make([]types.Object, 0)
+	for _, obj := range list.Contents {
+		if strings.HasPrefix(*obj.Key, InternalDir) {
+			continue
+		}
+		result = append(result, obj)
+	}
+	return result, nil
 }
 
 func (b *BucketDataNode) GetLastUpdate() time.Time {
@@ -68,20 +77,19 @@ func (b *BucketDataNode) GetLastUpdate() time.Time {
 func (b *BucketDataNode) getLastUpdate() time.Time {
 	obj, err := b.client.GetObject(b.ctx, &s3.GetObjectInput{
 		Bucket: &b.name,
-		Key:    aws.String(MetadataFileName),
+		Key:    aws.String(fmt.Sprintf("%s/metadata.json", InternalDir)),
 	})
 	if err != nil {
 		return time.Time{}
 	}
 
-	var buf []byte
-	n, err := obj.Body.Read(buf)
+	body, err := io.ReadAll(obj.Body)
 	if err != nil {
 		return time.Time{}
 	}
 
 	var metadata Metadata
-	err = json.Unmarshal(buf[:n], &metadata)
+	err = json.Unmarshal(body, &metadata)
 	if err != nil {
 		return time.Time{}
 	}
@@ -103,21 +111,22 @@ func (b *BucketDataNode) Get(path string) (string, error) {
 		Key:    &path,
 	})
 	if err != nil {
-		return "", fmt.Errorf("cannot get: %s", err)
+		return "", fmt.Errorf("cannot get object: %s", err)
 	}
-	var buf []byte
-	n, err := get.Body.Read(buf)
+	body, err := io.ReadAll(get.Body)
 	if err != nil {
-		return "", fmt.Errorf("cannot get: %s", err)
+		return "", fmt.Errorf("cannot read object: %s", err)
 	}
-	return string(buf[:n]), nil
+	return string(body), nil
 }
 
 func (b *BucketDataNode) Backup(path string) error {
 	_, err := b.client.CopyObject(b.ctx, &s3.CopyObjectInput{
-		Bucket:     &b.name,
-		CopySource: &path,
-		Key:        aws.String(fmt.Sprintf("%s/%s/%s", BackupDirectory, b.now.UTC().Format(DateFormat), path)),
+		// source
+		CopySource: aws.String(fmt.Sprintf("%s/%s", b.name, path)),
+		// destination
+		Bucket: &b.name,
+		Key:    aws.String(fmt.Sprintf("%s/backups/%s/%s", InternalDir, b.now.Format(DateFormat), path)),
 	})
 	return err
 }
@@ -138,8 +147,12 @@ func (b *BucketDataNode) UpdateMetadata() error {
 	}
 	_, err = b.client.PutObject(b.ctx, &s3.PutObjectInput{
 		Bucket: &b.name,
-		Key:    aws.String(MetadataFileName),
+		Key:    aws.String(fmt.Sprintf("%s/metadata.json", InternalDir)),
 		Body:   bytes.NewReader(content),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	b.lastUpdate = b.now
+	return nil
 }

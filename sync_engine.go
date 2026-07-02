@@ -2,21 +2,10 @@ package main
 
 import (
 	"log"
-	"strings"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
-
-func isSyncable(key string) bool {
-	if key == MetadataFileName {
-		return false
-	}
-	if strings.HasPrefix(key, BackupDirectory) {
-		return false
-	}
-	return true
-}
 
 // last write wins
 func syncNode(source, replica DataNode) error {
@@ -26,9 +15,7 @@ func syncNode(source, replica DataNode) error {
 	}
 	srcObjects := make(map[string]types.Object)
 	for _, obj := range srcList {
-		if key := *obj.Key; isSyncable(key) {
-			srcObjects[key] = obj
-		}
+		srcObjects[*obj.Key] = obj
 	}
 
 	replList, err := replica.List()
@@ -39,9 +26,6 @@ func syncNode(source, replica DataNode) error {
 	var wg sync.WaitGroup
 	for _, replObj := range replList {
 		key := *replObj.Key
-		if !isSyncable(key) {
-			continue
-		}
 		if srcObj, found := srcObjects[key]; found {
 			wg.Go(func() { syncObject(source, replica, &srcObj, &replObj) })
 			delete(srcObjects, key)
@@ -55,6 +39,11 @@ func syncNode(source, replica DataNode) error {
 	wg.Wait()
 
 	return source.UpdateMetadata()
+}
+
+func areIdentical(obj1, obj2 *types.Object) bool {
+	// return *obj1.ETag == *obj2.ETag
+	return *obj1.Key == *obj2.Key && *obj1.Size == *obj2.Size
 }
 
 func syncObject(source, replica DataNode, srcObj, replObj *types.Object) error {
@@ -103,8 +92,8 @@ func syncObject(source, replica DataNode, srcObj, replObj *types.Object) error {
 	// both objects exists
 	// if etags are equal -> do nothing
 	// TODO Fix checking identical objects
-	if srcObj.ETag == replObj.ETag {
-		log.Printf("INFO: same etag for %s: nothing to sync\n", *srcObj.Key)
+	if areIdentical(srcObj, replObj) {
+		log.Printf("INFO: indentical objects %s: nothing to sync\n", *srcObj.Key)
 		return nil
 	}
 	// if source last modified is greater -> do nothing

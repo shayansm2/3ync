@@ -27,16 +27,15 @@ type DataNode interface {
 	GetLastUpdate() time.Time
 	Create(path, body string) error
 	Get(path string) (string, error)
-	Backup(path string) error
+	Backup(path string, syncTime time.Time) error
 	Delete(path string) error
-	UpdateMetadata() error
+	UpdateMetadata(syncTime time.Time) error
 }
 
 type BucketDataNode struct {
 	name           string
 	ctx            context.Context
 	client         *s3.Client
-	now            time.Time
 	lastUpdate     time.Time
 	lastUpdateOnce sync.Once
 }
@@ -46,7 +45,6 @@ func NewBucketDataNode(ctx context.Context, client *s3.Client, name string) *Buc
 		name:   name,
 		ctx:    ctx,
 		client: client,
-		now:    time.Now().UTC(),
 	}
 }
 
@@ -120,13 +118,13 @@ func (b *BucketDataNode) Get(path string) (string, error) {
 	return string(body), nil
 }
 
-func (b *BucketDataNode) Backup(path string) error {
+func (b *BucketDataNode) Backup(path string, syncTime time.Time) error {
 	_, err := b.client.CopyObject(b.ctx, &s3.CopyObjectInput{
 		// source
 		CopySource: aws.String(fmt.Sprintf("%s/%s", b.name, path)),
 		// destination
 		Bucket: &b.name,
-		Key:    aws.String(fmt.Sprintf("%s/backups/%s/%s", InternalDir, b.now.Format(DateFormat), path)),
+		Key:    aws.String(fmt.Sprintf("%s/backups/%s/%s", InternalDir, syncTime.Format(DateFormat), path)),
 	})
 	return err
 }
@@ -139,8 +137,8 @@ func (b *BucketDataNode) Delete(path string) error {
 	return err
 }
 
-func (b *BucketDataNode) UpdateMetadata() error {
-	metadata := Metadata{LastUpdate: b.now}
+func (b *BucketDataNode) UpdateMetadata(syncTime time.Time) error {
+	metadata := Metadata{LastUpdate: syncTime.UTC()}
 	content, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("cannot update metadata: %s", err)
@@ -153,6 +151,6 @@ func (b *BucketDataNode) UpdateMetadata() error {
 	if err != nil {
 		return err
 	}
-	b.lastUpdate = b.now
+	b.lastUpdate = syncTime.UTC()
 	return nil
 }

@@ -16,7 +16,11 @@ import (
 func main() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Println("WARN: no .env file found, relying on env variables")
+	}
+
+	if len(os.Args) != 3 {
+		log.Fatal("usage: 3ync <source_bucket> <replica_bucket>")
 	}
 
 	ctx := context.Background()
@@ -25,16 +29,29 @@ func main() {
 		log.Fatal(err)
 	}
 
-	desktop := NewBucketDataNode(ctx, client, "desktop")
-	main := NewBucketDataNode(ctx, client, "obsidian")
+	srcBucket := os.Args[1]
+	replicaBucket := os.Args[2]
 
-	err = SyncNode(main, desktop)
+	err = SyncNode(
+		NewBucketDataNode(ctx, client, srcBucket),
+		NewBucketDataNode(ctx, client, replicaBucket),
+	)
 	if err != nil {
-		fmt.Print(err)
+		log.Fatal(err)
 	}
 }
 
 func createS3Client(ctx context.Context) (*s3.Client, error) {
+	if os.Getenv("ACCESS_KEY") == "" {
+		return nil, fmt.Errorf("ACCESS_KEY not found in env variables")
+	}
+	if os.Getenv("SECRET_KEY") == "" {
+		return nil, fmt.Errorf("SECRET_KEY not found in env variables")
+	}
+	if os.Getenv("BASE_END_POINT") == "" {
+		return nil, fmt.Errorf("BASE_END_POINT not found in env variables")
+	}
+
 	cfg, err := config.LoadDefaultConfig(ctx,
 		config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(os.Getenv("ACCESS_KEY"), os.Getenv("SECRET_KEY"), ""),

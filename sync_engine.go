@@ -40,7 +40,7 @@ func SyncNode(source, replica DataNode) error {
 	}
 	wg.Wait()
 
-	return source.UpdateMetadata(syncTime)
+	return source.UpdateMetadata(syncTime, replica.Name())
 }
 
 func areIdentical(obj1, obj2 *types.Object) bool {
@@ -52,7 +52,7 @@ func syncObject(source, replica DataNode, srcObj, replObj *types.Object, syncTim
 	// if object not exists in source but exists in replica
 	if srcObj == nil {
 		// if last modified < last update -> do nothing, will be deleted in next syncs
-		if replObj.LastModified.Before(source.GetLastUpdate()) {
+		if replObj.LastModified.Before(source.GetLastUpdate(replica.Name())) {
 			log.Printf("INFO: %s's replica.LastModified < source.LastUpdate: nothing to sync\n", *replObj.Key)
 			return nil
 		}
@@ -73,7 +73,7 @@ func syncObject(source, replica DataNode, srcObj, replObj *types.Object, syncTim
 	// if object exists in source but not in replica
 	if replObj == nil {
 		// if last modified > last update -> keep, do nothing
-		if srcObj.LastModified.After(replica.GetLastUpdate()) {
+		if srcObj.LastModified.After(replica.GetLastUpdate(source.Name())) {
 			log.Printf("INFO: %s's source.LastModified > replica.lastUpdate: nothing to sync\n", *srcObj.Key)
 			return nil
 		}

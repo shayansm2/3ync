@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -19,33 +18,38 @@ const InternalDir = ".3ync"
 const DateFormat = "2006-01-02-15-04-05"
 
 type Metadata struct {
-	LastUpdate time.Time `json:"last_update"`
+	LastUpdate map[string]time.Time `json:"last_update"`
 }
 
 type DataNode interface {
+	Name() string
 	List() ([]types.Object, error)
-	GetLastUpdate() time.Time
+	GetLastUpdate(repl string) time.Time
 	Create(path, body string) error
 	Get(path string) (string, error)
 	Backup(path string, syncTime time.Time) error
 	Delete(path string) error
-	UpdateMetadata(syncTime time.Time) error
+	UpdateMetadata(syncTime time.Time, repl string) error
 }
 
 type BucketDataNode struct {
-	name           string
-	ctx            context.Context
-	client         *s3.Client
-	lastUpdate     time.Time
-	lastUpdateOnce sync.Once
+	name        string
+	ctx         context.Context
+	client      *s3.Client
+	lastUpdates map[string]time.Time // TODO is it concurrent safe?
 }
 
 func NewBucketDataNode(ctx context.Context, client *s3.Client, name string) *BucketDataNode {
 	return &BucketDataNode{
-		name:   name,
-		ctx:    ctx,
-		client: client,
+		name:        name,
+		ctx:         ctx,
+		client:      client,
+		lastUpdates: make(map[string]time.Time),
 	}
+}
+
+func (b *BucketDataNode) Name() string {
+	return b.name
 }
 
 func (b *BucketDataNode) List() ([]types.Object, error) {
@@ -65,33 +69,43 @@ func (b *BucketDataNode) List() ([]types.Object, error) {
 	return result, nil
 }
 
-func (b *BucketDataNode) GetLastUpdate() time.Time {
-	b.lastUpdateOnce.Do(func() {
-		b.lastUpdate = b.getLastUpdate()
-	})
-	return b.lastUpdate
+func (b *BucketDataNode) GetLastUpdate(repl string) time.Time {
+	if lastUpdate, found := b.lastUpdates[repl]; found {
+		return lastUpdate
+	}
+	lastUpdate := b.getLastUpdate(repl)
+	b.lastUpdates[repl] = lastUpdate
+	return lastUpdate
 }
 
-func (b *BucketDataNode) getLastUpdate() time.Time {
+func (b *BucketDataNode) getLastUpdate(repl string) time.Time {
+	metadata, err := b.getMetadata()
+	if err != nil {
+		return time.Time{}
+	}
+	if lastUpdate, found := metadata.LastUpdate[repl]; found {
+		return lastUpdate
+	}
+	return time.Time{}
+}
+
+func (b *BucketDataNode) getMetadata() (*Metadata, error) {
 	obj, err := b.client.GetObject(b.ctx, &s3.GetObjectInput{
 		Bucket: &b.name,
 		Key:    aws.String(fmt.Sprintf("%s/metadata.json", InternalDir)),
 	})
 	if err != nil {
-		return time.Time{}
+		return nil, err
 	}
 
 	body, err := io.ReadAll(obj.Body)
 	if err != nil {
-		return time.Time{}
+		return nil, err
 	}
 
 	var metadata Metadata
 	err = json.Unmarshal(body, &metadata)
-	if err != nil {
-		return time.Time{}
-	}
-	return metadata.LastUpdate
+	return &metadata, err
 }
 
 func (b *BucketDataNode) Create(path, body string) error {
@@ -137,8 +151,15 @@ func (b *BucketDataNode) Delete(path string) error {
 	return err
 }
 
-func (b *BucketDataNode) UpdateMetadata(syncTime time.Time) error {
-	metadata := Metadata{LastUpdate: syncTime.UTC()}
+func (b *BucketDataNode) UpdateMetadata(syncTime time.Time, repl string) error {
+	metadata, err := b.getMetadata()
+	if err != nil {
+		new := Metadata{LastUpdate: map[string]time.Time{repl: syncTime.UTC()}}
+		metadata = &new
+	} else {
+		metadata.LastUpdate[repl] = syncTime
+	}
+
 	content, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("cannot update metadata: %s", err)
@@ -151,6 +172,6 @@ func (b *BucketDataNode) UpdateMetadata(syncTime time.Time) error {
 	if err != nil {
 		return err
 	}
-	b.lastUpdate = syncTime.UTC()
+	b.lastUpdates[repl] = syncTime.UTC()
 	return nil
 }

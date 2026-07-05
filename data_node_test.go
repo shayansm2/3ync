@@ -41,15 +41,15 @@ func TestBucketDataNode(t *testing.T) {
 	})
 
 	t.Run("test last_update metadata", func(t *testing.T) {
-		assert.Equal(t, time.Time{}, bdn.GetLastUpdate())
-		assert.Equal(t, time.Time{}, bdn.GetLastUpdate())
-		err = bdn.UpdateMetadata(time.Now())
+		assert.Equal(t, time.Time{}, bdn.GetLastUpdate("fake"))
+		assert.Equal(t, time.Time{}, bdn.GetLastUpdate("fake"))
+		err = bdn.UpdateMetadata(time.Now(), "fake")
 		require.NoError(t, err)
-		lastUpdate := bdn.GetLastUpdate()
+		lastUpdate := bdn.GetLastUpdate("fake")
 		assert.NotEqual(t, time.Time{}, lastUpdate)
 
 		bdn2 := NewBucketDataNode(ctx, client, bucketName)
-		assert.Equal(t, lastUpdate, bdn2.GetLastUpdate())
+		assert.Equal(t, lastUpdate, bdn2.GetLastUpdate("fake"))
 	})
 
 	t.Run("test list does not returns internal directories", func(t *testing.T) {

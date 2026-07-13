@@ -27,7 +27,7 @@ type DataNode interface {
 	GetLastUpdate(repl string) time.Time
 	Create(path, body string) error
 	Get(path string) (string, error)
-	Backup(path string, syncTime time.Time) error
+	Backup(path string, time time.Time) error
 	Delete(path string) error
 	UpdateMetadata(syncTime time.Time, repl string) error
 }
@@ -132,13 +132,13 @@ func (b *BucketDataNode) Get(path string) (string, error) {
 	return string(body), nil
 }
 
-func (b *BucketDataNode) Backup(path string, syncTime time.Time) error {
+func (b *BucketDataNode) Backup(path string, time time.Time) error {
 	_, err := b.client.CopyObject(b.ctx, &s3.CopyObjectInput{
 		// source
 		CopySource: aws.String(fmt.Sprintf("%s/%s", b.name, path)),
 		// destination
 		Bucket: &b.name,
-		Key:    aws.String(fmt.Sprintf("%s/backups/%s/%s", InternalDir, syncTime.Format(DateFormat), path)),
+		Key:    aws.String(fmt.Sprintf("%s/backups/%s/%s", InternalDir, time.Format(DateFormat), path)),
 	})
 	return err
 }

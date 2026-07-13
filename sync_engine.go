@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -9,116 +10,150 @@ import (
 )
 
 // last write wins
-func SyncNode(source, replica DataNode) error {
-	syncTime := time.Now()
-	srcList, err := source.List()
+func Synchronize(first, second DataNode) error {
+	backupTime := time.Now()
+	List1, err := first.List()
 	if err != nil {
 		return err
 	}
-	srcObjects := make(map[string]types.Object)
-	for _, obj := range srcList {
-		srcObjects[*obj.Key] = obj
+	Objects1 := make(map[string]types.Object)
+	for _, obj := range List1 {
+		Objects1[*obj.Key] = obj
 	}
 
-	replList, err := replica.List()
+	List2, err := second.List()
 	if err != nil {
 		return err
 	}
 
 	var wg sync.WaitGroup
-	for _, replObj := range replList {
-		key := *replObj.Key
-		if srcObj, found := srcObjects[key]; found {
-			wg.Go(func() { syncObject(source, replica, &srcObj, &replObj, syncTime) })
-			delete(srcObjects, key)
+	for _, obj2 := range List2 {
+		key := *obj2.Key
+		if obj1, found := Objects1[key]; found {
+			wg.Go(func() { syncObject(first, second, &obj1, &obj2, backupTime) })
+			delete(Objects1, key)
 		} else {
-			wg.Go(func() { syncObject(source, replica, nil, &replObj, syncTime) })
+			wg.Go(func() { syncObject(first, second, nil, &obj2, backupTime) })
 		}
 	}
-	for _, srcObj := range srcObjects {
-		wg.Go(func() { syncObject(source, replica, &srcObj, nil, syncTime) })
+	for _, obj := range Objects1 {
+		wg.Go(func() { syncObject(first, second, &obj, nil, backupTime) })
 	}
 	wg.Wait()
 
-	return source.UpdateMetadata(syncTime, replica.Name())
+	syncTime := time.Now()
+	err = first.UpdateMetadata(syncTime, second.Name())
+	if err != nil {
+		return err
+	}
+	// todo: rollback left
+	return second.UpdateMetadata(syncTime, first.Name())
 }
 
-func areIdentical(obj1, obj2 *types.Object) bool {
-	return *obj1.ETag == *obj2.ETag
-	// return *obj1.Key == *obj2.Key && *obj1.Size == *obj2.Size
+func syncObject(first, second DataNode, obj1, obj2 *types.Object, backupTime time.Time) error {
+	if obj1 != nil && obj2 != nil {
+		if *obj1.ETag == *obj2.ETag {
+			// log.Printf("INFO: indentical objects %s: nothing to sync\n", *leftObj.Key)
+			return nil
+		}
+		var old, new DataNode
+		var oldObj, newObj types.Object
+		if obj1.LastModified.After(*obj2.LastModified) {
+			log.Printf(
+				"INFO: %s's %s.LastModified > %s.LastModified :update %s\n",
+				*obj1.Key, first.Name(), second.Name(), second.Name(),
+			)
+			new, old = first, second
+			newObj, oldObj = *obj1, *obj2
+		} else {
+			log.Printf(
+				"INFO: %s's %s.LastModified < %s.LastModified :update %s\n",
+				*obj1.Key, first.Name(), second.Name(), first.Name(),
+			)
+			new, old = second, first
+			newObj, oldObj = *obj2, *obj1
+		}
+		err := backupAndReplace(new, old, &newObj, &oldObj, backupTime)
+		if err != nil {
+			log.Printf("ERROR: cannot sync %s in %s: %s\n", *newObj.Key, old.Name(), err)
+			return err
+		}
+		log.Printf("INFO: modified %s in %s\n", *newObj.Key, old.Name())
+		return nil
+	}
+	var miss, exist DataNode
+	var obj *types.Object
+	if obj1 == nil {
+		miss, exist = first, second
+		obj = obj2
+	} else {
+		miss, exist = second, first
+		obj = obj1
+	}
+	if obj.LastModified.Before(miss.GetLastUpdate(exist.Name())) {
+		log.Printf(
+			"INFO: %s.%s.LastModified < %s.LastUpdate :delete %s from %s\n",
+			exist.Name(), *obj.Key, miss.Name(), *obj.Key, exist.Name(),
+		)
+		err := backupAndDelete(exist, obj, backupTime)
+		if err != nil {
+			log.Printf("ERROR: cannot delete %s in %s: %s\n", *obj.Key, exist.Name(), err)
+			return err
+		}
+		log.Printf("INFO: deleted %s in %s\n", *obj.Key, exist.Name())
+		return nil
+	}
+
+	log.Printf(
+		"INFO: %s.%s.LastModified < %s.LastUpdate :create %s in %s\n",
+		exist.Name(), *obj.Key, miss.Name(), *obj.Key, miss.Name(),
+	)
+	err := create(exist, miss, obj)
+	if err != nil {
+		log.Printf("ERROR: cannot create %s in %s: %s\n", *obj.Key, miss.Name(), err)
+		return err
+	}
+	log.Printf("INFO: created %s in %s\n", *obj.Key, miss.Name())
+	return nil
 }
 
-func syncObject(source, replica DataNode, srcObj, replObj *types.Object, syncTime time.Time) error {
-	// if object not exists in source but exists in replica
-	if srcObj == nil {
-		// if last modified < last update -> do nothing, will be deleted in next syncs
-		if replObj.LastModified.Before(source.GetLastUpdate(replica.Name())) {
-			log.Printf("INFO: %s's replica.LastModified < source.LastUpdate: nothing to sync\n", *replObj.Key)
-			return nil
-		}
-		// if last modified > last update -> create
-		fileContent, err := replica.Get(*replObj.Key)
-		if err != nil {
-			log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
-			return err
-		}
-		err = source.Create(*replObj.Key, fileContent)
-		if err != nil {
-			log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
-			return err
-		}
-		log.Printf("INFO: created %s\n", *replObj.Key)
-		return nil
-	}
-	// if object exists in source but not in replica
-	if replObj == nil {
-		// if last modified > last update -> keep, do nothing
-		if srcObj.LastModified.After(replica.GetLastUpdate(source.Name())) {
-			log.Printf("INFO: %s's source.LastModified > replica.lastUpdate: nothing to sync\n", *srcObj.Key)
-			return nil
-		}
-		// else -> backup & delete
-		err := source.Backup(*srcObj.Key, syncTime)
-		if err != nil {
-			log.Printf("ERROR: cannot get backup %s: %s\n", *srcObj.Key, err)
-			return err
-		}
-		err = source.Delete(*srcObj.Key)
-		if err != nil {
-			log.Printf("ERROR: cannot sync %s: %s\n", *srcObj.Key, err)
-			return err
-		}
-		log.Printf("INOF: deleted %s\n", *srcObj.Key)
-		return nil
-	}
-	// both objects exists
-	// if etags are equal -> do nothing
-	// TODO Fix checking identical objects
-	if areIdentical(srcObj, replObj) {
-		log.Printf("INFO: indentical objects %s: nothing to sync\n", *srcObj.Key)
-		return nil
-	}
-	// if source last modified is greater -> do nothing
-	if srcObj.LastModified.After(*replObj.LastModified) {
-		log.Printf("INFO: %s's source.LastModified > replica.LastModified :nothing to sync\n", *srcObj.Key)
-		return nil
-	}
-	// if destination last modified is greater -> backup + replace
-	err := source.Backup(*srcObj.Key, syncTime)
+func backupAndReplace(new, old DataNode, newObj, oldObj *types.Object, backupTime time.Time) error {
+	err := old.Backup(*oldObj.Key, backupTime)
 	if err != nil {
-		log.Printf("ERROR: cannot get backup %s: %s\n", *srcObj.Key, err)
+		return fmt.Errorf("ERROR: cannot get backup from %s in %s: %s\n", *oldObj.Key, old.Name(), err)
+	}
+	fileContent, err := new.Get(*newObj.Key)
+	if err != nil {
+		return fmt.Errorf("ERROR: cannot get %s from %s: %s\n", *newObj.Key, new.Name(), err)
+	}
+	err = old.Create(*newObj.Key, fileContent)
+	if err != nil {
+		log.Printf("ERROR: cannot create %s in %s: %s\n", *newObj.Key, old.Name(), err)
 		return err
 	}
-	fileContent, err := replica.Get(*replObj.Key)
+	return nil
+}
+
+func backupAndDelete(node DataNode, obj *types.Object, backupTime time.Time) error {
+	err := node.Backup(*obj.Key, backupTime)
 	if err != nil {
-		log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
-		return err
+		return fmt.Errorf("ERROR: cannot get backup %s in %s: %s\n", *obj.Key, node.Name(), err)
 	}
-	err = source.Create(*replObj.Key, fileContent)
+	err = node.Delete(*obj.Key)
 	if err != nil {
-		log.Printf("ERROR: cannot sync %s: %s\n", *replObj.Key, err)
-		return err
+		return fmt.Errorf("ERROR: cannot delete %s in %s: %s\n", *obj.Key, node.Name(), err)
 	}
-	log.Printf("modified %s\n", *replObj.Key)
+	return nil
+}
+
+func create(src, dst DataNode, obj *types.Object) error {
+	fileContent, err := src.Get(*obj.Key)
+	if err != nil {
+		return fmt.Errorf("ERROR: cannot get %s from %s: %s\n", *obj.Key, src.Name(), err)
+	}
+	err = dst.Create(*obj.Key, fileContent)
+	if err != nil {
+		return fmt.Errorf("ERROR: cannot create %s in %s: %s\n", *obj.Key, dst.Name(), err)
+	}
 	return nil
 }

@@ -32,7 +32,7 @@ func main() {
 	srcBucket := os.Args[1]
 	replicaBucket := os.Args[2]
 
-	err = SyncNode(
+	err = Synchronize(
 		NewBucketDataNode(ctx, client, srcBucket),
 		NewBucketDataNode(ctx, client, replicaBucket),
 	)

@@ -11,6 +11,9 @@ import (
 
 // last write wins
 func Synchronize(first, second DataNode) error {
+	log.Printf("last sync time %s: %v\n", first.Name(), first.GetLastUpdate(second.Name()))
+	log.Printf("last sync time %s: %v\n", second.Name(), second.GetLastUpdate(first.Name()))
+
 	backupTime := time.Now()
 	List1, err := first.List()
 	if err != nil {
@@ -53,7 +56,7 @@ func Synchronize(first, second DataNode) error {
 func syncObject(first, second DataNode, obj1, obj2 *types.Object, backupTime time.Time) error {
 	if obj1 != nil && obj2 != nil {
 		if *obj1.ETag == *obj2.ETag {
-			// log.Printf("INFO: indentical objects %s: nothing to sync\n", *leftObj.Key)
+			// log.Printf("INFO: indentical objects %s: nothing to sync\n", *obj1.Key)
 			return nil
 		}
 		var old, new DataNode

@@ -48,12 +48,13 @@ func main() {
 	srcBucket := os.Args[2]
 	replicaBucket := os.Args[3]
 
-	if cmd == SyncCommand {
+	switch cmd {
+	case SyncCommand:
 		err = Synchronize(
 			NewBucketDataNode(ctx, client, srcBucket),
 			NewBucketDataNode(ctx, client, replicaBucket),
 		)
-	} else if cmd == ReplicateCommand {
+	case ReplicateCommand:
 		err = Replicate(
 			NewBucketDataNode(ctx, client, srcBucket),
 			NewBucketDataNode(ctx, client, replicaBucket),
